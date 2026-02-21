@@ -182,7 +182,7 @@ final class LQNetKitTests: XCTestCase {
         }
         let fileURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("mock.txt")
         try? "mockfile".write(to: fileURL, atomically: true, encoding: .utf8)
-        manager.upload(url: url, fileURL: fileURL) { result in
+        manager.upload(url: url, files: [(fileURL: fileURL, fieldName: "file", fileName: fileURL.lastPathComponent, mimeType: "text/plain")]) { result in
             switch result {
             case .success(let data):
                 XCTAssertEqual(String(data: data, encoding: .utf8), "upload_ok")
@@ -372,6 +372,174 @@ final class LQNetKitTests: XCTestCase {
         }
         waitForExpectations(timeout: 2, handler: nil)
         task.cancel()
+    }
+    
+    // 多文件上传测试
+    func testMultiFileUploadMock() throws {
+        let expectation = self.expectation(description: "Multi file upload should succeed (mock)")
+        let manager = LQNetworkManager()
+        manager.enableMock = true
+        manager.addMockHandler { req in
+            if req.url?.absoluteString == "https://mock.test/multiupload" {
+                return ("multi_upload_ok".data(using: .utf8), nil, nil)
+            }
+            return nil
+        }
+        guard let url = URL(string: "https://mock.test/multiupload") else {
+            XCTFail("URL 构造失败")
+            return
+        }
+        let file1 = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("mock1.txt")
+        let file2 = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("mock2.txt")
+        try? "mockfile1".write(to: file1, atomically: true, encoding: .utf8)
+        try? "mockfile2".write(to: file2, atomically: true, encoding: .utf8)
+        let files = [
+            (fileURL: file1, fieldName: "fileA", fileName: "mock1.txt", mimeType: "text/plain"),
+            (fileURL: file2, fieldName: "fileB", fileName: "mock2.txt", mimeType: "text/plain")
+        ]
+        manager.upload(url: url, files: files) { result in
+            switch result {
+            case .success(let data):
+                XCTAssertEqual(String(data: data, encoding: .utf8), "multi_upload_ok")
+            case .failure(let error):
+                XCTFail("多文件上传失败: \(error)")
+            }
+            expectation.fulfill()
+        }
+        waitForExpectations(timeout: 2, handler: nil)
+    }
+    
+    // 全局请求/响应拦截器链测试
+    func testGlobalInterceptorChain() throws {
+        let expectation = self.expectation(description: "Global interceptor chain should work")
+        LQNetworkManager.globalRequestInterceptors = [
+            { req in req.setValue("test-token", forHTTPHeaderField: "X-Test-Token") }
+        ]
+        LQNetworkManager.globalResponseMiddlewares = [
+            { data, _ in
+                let str = String(data: data, encoding: .utf8) ?? ""
+                return (str + "-global").data(using: .utf8) ?? data
+            }
+        ]
+        let manager = LQNetworkManager()
+        manager.enableMock = true
+        manager.addMockHandler { req in
+            if req.value(forHTTPHeaderField: "X-Test-Token") == "test-token" {
+                return ("intercepted".data(using: .utf8), nil, nil)
+            }
+            return nil
+        }
+        guard let url = URL(string: "https://mock.test/intercept") else {
+            XCTFail("URL 构造失败")
+            return
+        }
+        manager.get(url: url) { result in
+            switch result {
+            case .success(let data):
+                XCTAssertEqual(String(data: data, encoding: .utf8), "intercepted-global")
+            case .failure(let error):
+                XCTFail("拦截器链失败: \(error)")
+            }
+            expectation.fulfill()
+        }
+        waitForExpectations(timeout: 2, handler: nil)
+        LQNetworkManager.globalRequestInterceptors = []
+        LQNetworkManager.globalResponseMiddlewares = []
+    }
+    
+    // 链路追踪与耗时统计测试
+    func testTraceIdAndTiming() throws {
+        let expectation = self.expectation(description: "TraceId and timing should work")
+        LQNetworkManager.enableTraceId = true
+        LQNetworkManager.traceIdHeaderKey = "X-Trace-Id"
+        LQNetworkManager.traceIdGenerator = { "trace-123" }
+        LQNetworkManager.enableTiming = true
+        var timing: TimeInterval = 0
+        LQNetworkManager.onRequestTiming = { req, duration in
+            if req.value(forHTTPHeaderField: "X-Trace-Id") == "trace-123" {
+                timing = duration
+            }
+        }
+        let manager = LQNetworkManager()
+        manager.enableMock = true
+        manager.addMockHandler { req in
+            if req.value(forHTTPHeaderField: "X-Trace-Id") == "trace-123" {
+                return ("trace_ok".data(using: .utf8), nil, nil)
+            }
+            return nil
+        }
+        guard let url = URL(string: "https://mock.test/trace") else {
+            XCTFail("URL 构造失败")
+            return
+        }
+        manager.get(url: url) { result in
+            switch result {
+            case .success(let data):
+                XCTAssertEqual(String(data: data, encoding: .utf8), "trace_ok")
+                XCTAssertTrue(timing >= 0)
+            case .failure(let error):
+                XCTFail("链路追踪失败: \(error)")
+            }
+            expectation.fulfill()
+        }
+        waitForExpectations(timeout: 2, handler: nil)
+        LQNetworkManager.enableTraceId = false
+        LQNetworkManager.enableTiming = false
+        LQNetworkManager.onRequestTiming = nil
+    }
+    
+    // 重试策略测试
+    func testRetryPolicy() throws {
+        let expectation = self.expectation(description: "Retry policy should work")
+        let manager = LQNetworkManager()
+        manager.retryPolicy = .init(maxRetryCount: 2, baseDelay: 0.1, maxDelay: 0.5, shouldRetry: { error, count in
+            return true
+        })
+        var callCount = 0
+        manager.enableMock = true
+        manager.addMockHandler { req in
+            callCount += 1
+            if callCount < 3 {
+                return (nil, nil, NSError(domain: "mock", code: -1, userInfo: nil))
+            } else {
+                return ("retry_success".data(using: .utf8), nil, nil)
+            }
+        }
+        guard let url = URL(string: "https://mock.test/retrypolicy") else {
+            XCTFail("URL 构造失败")
+            return
+        }
+        manager.get(url: url) { result in
+            switch result {
+            case .success(let data):
+                XCTAssertEqual(String(data: data, encoding: .utf8), "retry_success")
+                XCTAssertEqual(callCount, 3)
+            case .failure(let error):
+                XCTFail("重试策略失败: \(error)")
+            }
+            expectation.fulfill()
+        }
+        waitForExpectations(timeout: 2, handler: nil)
+    }
+    
+    // 网络状态监听细粒度测试
+    func testNetworkStatusChange() throws {
+        let expectation = self.expectation(description: "Network status change should trigger callback")
+        let manager = LQNetworkManager()
+        var statusHistory: [LQNetworkManager.NetworkStatus] = []
+        manager.onNetworkStatusChanged = { status in
+            statusHistory.append(status)
+        }
+        // 模拟状态变化
+        manager.currentNetworkStatus = LQNetworkManager.NetworkStatus.wifi
+        manager.onNetworkStatusChanged?(manager.currentNetworkStatus)
+        manager.currentNetworkStatus = LQNetworkManager.NetworkStatus.cellular
+        manager.onNetworkStatusChanged?(manager.currentNetworkStatus)
+        manager.currentNetworkStatus = LQNetworkManager.NetworkStatus.unavailable
+        manager.onNetworkStatusChanged?(manager.currentNetworkStatus)
+        XCTAssertEqual(statusHistory, [LQNetworkManager.NetworkStatus.wifi, LQNetworkManager.NetworkStatus.cellular, LQNetworkManager.NetworkStatus.unavailable])
+        expectation.fulfill()
+        waitForExpectations(timeout: 1, handler: nil)
     }
     
     override func setUpWithError() throws {
