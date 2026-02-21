@@ -238,7 +238,33 @@ public class LQNetworkManager {
     // MARK: - AsyncSequence 流式响应
     /// 以流式方式获取响应数据（适合大文件下载、SSE等场景）
     public func dataStream(url: URL, headers: [String: String]? = nil, chunkSize: Int = 4096) -> AsyncThrowingStream<Data, Error> {
-        AsyncThrowingStream { continuation in
+        if enableMock {
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            for handler in mockHandlers {
+                if let (mockData, _, mockError) = handler(request) {
+                    return AsyncThrowingStream { continuation in
+                        if let error = mockError {
+                            continuation.finish(throwing: error)
+                            return
+                        }
+                        guard let data = mockData else {
+                            continuation.finish(throwing: LQNetworkError.noData)
+                            return
+                        }
+                        var offset = 0
+                        while offset < data.count {
+                            let end = min(offset + chunkSize, data.count)
+                            let chunk = data.subdata(in: offset..<end)
+                            continuation.yield(chunk)
+                            offset = end
+                        }
+                        continuation.finish()
+                    }
+                }
+            }
+        }
+        return AsyncThrowingStream { continuation in
             var request = URLRequest(url: url)
             request.httpMethod = "GET"
             if let headers = headers {
@@ -614,6 +640,21 @@ public class LQNetworkManager {
         // 全局拦截器处理
         for interceptor in interceptors {
             interceptor(&request)
+        }
+        // Mock 支持
+        if enableMock {
+            for handler in mockHandlers {
+                if let (mockData, _, mockError) = handler(request) {
+                    if let error = mockError {
+                        completion(.failure(error))
+                    } else if let data = mockData {
+                        completion(.success(data))
+                    } else {
+                        completion(.failure(LQNetworkError.noData))
+                    }
+                    return
+                }
+            }
         }
         let task = session.dataTask(with: request) { data, response, error in
             if let error = error {

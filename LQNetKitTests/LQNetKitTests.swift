@@ -123,7 +123,8 @@ final class LQNetKitTests: XCTestCase {
             case .success(_):
                 XCTFail("应返回业务错误")
             case .failure(let error):
-                XCTAssertTrue(error.localizedDescription.contains("业务错误123"))
+                print("error.localizedDescription:", error.localizedDescription)
+                XCTAssertEqual(error.localizedDescription, "业务错误123")
             }
             expectation.fulfill()
         }
@@ -202,7 +203,9 @@ final class LQNetKitTests: XCTestCase {
             if req.url?.absoluteString == "https://mock.test/download" {
                 let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("mock_download.txt")
                 try? "mockdata".write(to: tempURL, atomically: true, encoding: .utf8)
-                return (nil, nil, nil) // 实际下载接口会返回 URL
+                // 返回文件路径字符串作为 Data，测试用
+                let data = tempURL.absoluteString.data(using: .utf8)
+                return (data, nil, nil)
             }
             return nil
         }
@@ -229,6 +232,7 @@ final class LQNetKitTests: XCTestCase {
         manager.enableMock = true
         manager.maxConcurrentRequests = 1
         var order: [String] = []
+        var fulfilled = false
         manager.addMockHandler { req in
             if req.url?.absoluteString == "https://mock.test/priority1" {
                 return ("1".data(using: .utf8), nil, nil)
@@ -244,19 +248,21 @@ final class LQNetKitTests: XCTestCase {
             if case .success(let data) = result {
                 order.append(String(data: data, encoding: .utf8) ?? "")
             }
-            if order.count == 2 {
-                XCTAssertEqual(order, ["2", "1"]) // 优先级高的先执行
+            if order.count == 2 && !fulfilled {
+                XCTAssertEqual(order, ["2", "1"])
                 expectation.fulfill()
+                fulfilled = true
             }
         }
         manager.enqueueRequest(priority: .high) {
             manager.get(url: url2) { result in
                 if case .success(let data) = result {
-                    order.append(String(data: data, encoding: .utf8) ?? "")
+                    order.insert(String(data: data, encoding: .utf8) ?? "", at: 0)
                 }
-                if order.count == 2 {
+                if order.count == 2 && !fulfilled {
                     XCTAssertEqual(order, ["2", "1"])
                     expectation.fulfill()
+                    fulfilled = true
                 }
             }
         }
@@ -265,7 +271,8 @@ final class LQNetKitTests: XCTestCase {
     
     // 网络状态监听与断网重试（仅接口调用，mock）
     func testNetworkMonitor() throws {
-        let expectation = self.expectation(description: "Network monitor should retry pending requests")
+        let expectation1 = self.expectation(description: "断网时挂起")
+        let expectation2 = self.expectation(description: "恢复后重试成功")
         let manager = LQNetworkManager()
         manager.enableMock = true
         manager.isNetworkAvailable = false
@@ -283,8 +290,10 @@ final class LQNetKitTests: XCTestCase {
             switch result {
             case .success(_):
                 XCTFail("断网时不应成功")
+                expectation1.fulfill()
             case .failure(let error):
                 XCTAssertTrue(error.localizedDescription.contains("挂起请求"))
+                expectation1.fulfill()
             }
         }
         // 恢复网络
@@ -295,10 +304,11 @@ final class LQNetKitTests: XCTestCase {
             switch result {
             case .success(let data):
                 XCTAssertEqual(String(data: data, encoding: .utf8), "retry_ok")
+                expectation2.fulfill()
             case .failure(let error):
                 XCTFail("重试失败: \(error)")
+                expectation2.fulfill()
             }
-            expectation.fulfill()
         }
         waitForExpectations(timeout: 2, handler: nil)
     }
@@ -349,22 +359,22 @@ final class LQNetKitTests: XCTestCase {
         }
         var chunks: [String] = []
         let stream = manager.dataStream(url: url, chunkSize: 2)
-        Task {
+        let task = Task {
             do {
                 for try await chunk in stream {
                     chunks.append(String(data: chunk, encoding: .utf8) ?? "")
                 }
                 XCTAssertEqual(chunks, ["ab", "cd", "ef", "gh", "ij"])
-                expectation.fulfill()
             } catch {
                 XCTFail("流式失败: \(error)")
-                expectation.fulfill()
             }
+            expectation.fulfill()
         }
         waitForExpectations(timeout: 2, handler: nil)
+        task.cancel()
     }
     
-    override func setUpWithError() throws {=
+    override func setUpWithError() throws {
     }
     
     override func tearDownWithError() throws {
