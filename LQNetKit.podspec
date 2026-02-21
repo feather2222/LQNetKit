@@ -9,7 +9,7 @@ LQNetKit 是一个 Swift 编写的通用网络请求工具库，支持 GET/POST/
   s.license      = { :type => "MIT", :file => "LICENSE" }
   s.author       = { "xiangduojia" => "1402479908@qq.com" }
   s.source       = { :git => "https://github.com/feather2222/LQNetKit.git", :tag => s.version }
-  s.platform     = :ios, "12.0"
+  s.platform     = :ios, "13.0"
   s.swift_version = "5.0"
   s.source_files = "LQNetKit/**/*.{swift}"
   s.requires_arc = true
